@@ -1,51 +1,91 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.24;
 
+/**
+ * @title Crowdfunding
+ * @dev A contract that allows users to create and participate in crowdfunding campaigns.
+ */
 contract Crowdfunding {
     
-    // Campaign structure definition
+    /// @notice Owner of the contract
+    address public owner;
+    
+    /// @dev Initializes the contract setting the deployer as the initial owner.
+    constructor() {
+        owner = msg.sender;
+    }
+    
+    /// @dev Modifier to restrict functions to the contract owner.
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Caller is not the owner");
+        _;
+    }
+    
+    /// @dev Structure to store campaign details.
     struct Campaign {
         string title;
         string description;
         address payable benefactor;
-        uint goal;
-        uint deadline;
-        uint amountRaised;
+        uint256 goal;
+        uint256 deadline;
+        uint256 amountRaised;
         bool ended;
     }
     
-    // Mapping from campaign ID to Campaign struct
-    mapping(uint => Campaign) public campaigns;
-    uint public campaignCount;
+    /// @notice Mapping from campaign ID to Campaign details.
+    mapping(uint256 => Campaign) public campaigns;
     
-    // Events
-    event CampaignCreated(uint indexed campaignId, string title, string description, address benefactor, uint goal, uint deadline);
-    event DonationReceived(uint indexed campaignId, address indexed donor, uint amount);
-    event CampaignEnded(uint indexed campaignId, address benefactor, uint amountRaised);
+    /// @notice Total number of campaigns created.
+    uint256 public campaignCount;
     
-    // Modifier to check if a campaign exists
-    modifier campaignExists(uint campaignId) {
-        require(campaignId < campaignCount, "Campaign does not exist");
-        _;
-    }
+    /// @notice Mapping to keep track of donations per campaign per donor.
+    mapping(uint256 => mapping(address => uint256)) public donations;
     
-    // Modifier to check if the campaign deadline has not passed
-    modifier beforeDeadline(uint campaignId) {
-        require(block.timestamp < campaigns[campaignId].deadline, "Campaign deadline has passed");
-        _;
-    }
+    /// @notice Event emitted when a new campaign is created.
+    event CampaignCreated(
+        uint256 indexed campaignId,
+        string title,
+        string description,
+        address indexed benefactor,
+        uint256 goal,
+        uint256 deadline
+    );
     
-    // Modifier to check if the campaign has not ended
-    modifier hasNotEnded(uint campaignId) {
-        require(!campaigns[campaignId].ended, "Campaign has already ended");
-        _;
-    }
+    /// @notice Event emitted when a donation is received.
+    event DonationReceived(
+        uint256 indexed campaignId,
+        address indexed donor,
+        uint256 amount
+    );
     
-    // Function to create a new campaign
-    function createCampaign(string memory _title, string memory _description, address payable _benefactor, uint _goal, uint _duration) public {
+    /// @notice Event emitted when a campaign is successfully ended.
+    event CampaignEnded(
+        uint256 indexed campaignId,
+        address indexed benefactor,
+        uint256 amountRaised
+    );
+    
+    /**
+     * @notice Creates a new crowdfunding campaign.
+     * @param _title The title of the campaign.
+     * @param _description A brief description of the campaign.
+     * @param _benefactor The address that will receive the funds.
+     * @param _goal The fundraising goal in wei.
+     * @param _duration The duration of the campaign in seconds.
+     */
+    function createCampaign(
+        string calldata _title,
+        string calldata _description,
+        address payable _benefactor,
+        uint256 _goal,
+        uint256 _duration
+    ) external {
         require(_goal > 0, "Goal must be greater than zero");
+        require(_duration > 0, "Duration must be greater than zero");
+        require(_benefactor != address(0), "Invalid benefactor address");
         
-        uint deadline = block.timestamp + _duration;
+        uint256 deadline = block.timestamp + _duration;
+        
         campaigns[campaignCount] = Campaign({
             title: _title,
             description: _description,
@@ -56,50 +96,79 @@ contract Crowdfunding {
             ended: false
         });
         
-        emit CampaignCreated(campaignCount, _title, _description, _benefactor, _goal, deadline);
+        emit CampaignCreated(
+            campaignCount,
+            _title,
+            _description,
+            _benefactor,
+            _goal,
+            deadline
+        );
         
         campaignCount++;
     }
     
-    // Function to donate to a campaign
-    function donateToCampaign(uint campaignId) public payable campaignExists(campaignId) beforeDeadline(campaignId) hasNotEnded(campaignId) {
+    /**
+     * @notice Allows users to donate to a specific campaign.
+     * @param _campaignId The ID of the campaign to donate to.
+     */
+    function donateToCampaign(uint256 _campaignId) external payable {
+        Campaign storage campaign = campaigns[_campaignId];
+        
+        require(block.timestamp < campaign.deadline, "Campaign has ended");
+        require(!campaign.ended, "Campaign has already ended");
         require(msg.value > 0, "Donation must be greater than zero");
         
-        Campaign storage campaign = campaigns[campaignId];
         campaign.amountRaised += msg.value;
+        donations[_campaignId][msg.sender] += msg.value;
         
-        emit DonationReceived(campaignId, msg.sender, msg.value);
+        emit DonationReceived(_campaignId, msg.sender, msg.value);
     }
     
-    // Function to end the campaign and transfer the funds
-    function endCampaign(uint campaignId) public campaignExists(campaignId) hasNotEnded(campaignId) {
-        Campaign storage campaign = campaigns[campaignId];
-        require(block.timestamp >= campaign.deadline, "Campaign deadline has not yet passed");
+    /**
+     * @notice Ends a campaign and transfers the funds to the benefactor.
+     * @param _campaignId The ID of the campaign to end.
+     */
+    function endCampaign(uint256 _campaignId) external {
+        Campaign storage campaign = campaigns[_campaignId];
+        
+        require(block.timestamp >= campaign.deadline, "Campaign is still ongoing");
+        require(!campaign.ended, "Campaign has already ended");
         
         campaign.ended = true;
-        campaign.benefactor.transfer(campaign.amountRaised);
         
-        emit CampaignEnded(campaignId, campaign.benefactor, campaign.amountRaised);
+        uint256 amount = campaign.amountRaised;
+        
+        if (amount > 0) {
+            (bool success, ) = campaign.benefactor.call{value: amount}("");
+            require(success, "Transfer to benefactor failed");
+        }
+        
+        emit CampaignEnded(_campaignId, campaign.benefactor, amount);
     }
     
-    // Fallback function to prevent accidental ETH sending
+    /**
+     * @notice Allows the contract owner to withdraw any leftover funds.
+     */
+    function withdrawLeftoverFunds() external onlyOwner {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No funds to withdraw");
+        
+        (bool success, ) = owner.call{value: balance}("");
+        require(success, "Withdrawal failed");
+    }
+    
+    /**
+     * @notice Receive function to accept plain Ether transfers.
+     */
+    receive() external payable {
+        revert("Please use donateToCampaign function to donate");
+    }
+    
+    /**
+     * @notice Fallback function to handle unknown function calls.
+     */
     fallback() external payable {
-        revert("Fallback function triggered, ETH returned");
-    }
-
-    // Function to withdraw leftover funds (Bonus: Contract Ownership)
-    address public owner;
-    
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Caller is not the owner");
-        _;
-    }
-    
-    constructor() {
-        owner = msg.sender;
-    }
-    
-    function withdrawLeftoverFunds() public onlyOwner {
-        payable(owner).transfer(address(this).balance);
+        revert("Invalid function call");
     }
 }
